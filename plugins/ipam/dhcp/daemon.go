@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/rpc"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sync"
@@ -42,6 +43,7 @@ type DHCP struct {
 	clientTimeout   time.Duration
 	clientResendMax time.Duration
 	broadcast       bool
+	script          string
 }
 
 func newDHCP(clientTimeout, clientResendMax time.Duration) *DHCP {
@@ -99,6 +101,20 @@ func (d *DHCP) Allocate(args *skel.CmdArgs, result *current.Result) error {
 	}}
 	result.Routes = l.Routes()
 
+	if d.script != "" {
+		cmd := exec.Command(d.script, "bound")
+		cmd.Env = append(os.Environ(),
+			fmt.Sprintf("ID=%v", args.ContainerID),
+			fmt.Sprintf("NAME=%v", conf.Name),
+			fmt.Sprintf("ip=%v", ipn.IP.String()),
+			fmt.Sprintf("subnet=%v", net.ParseIP("255.255.255.255").Mask(ipn.Mask)),
+			fmt.Sprintf("router=%v", l.Gateway().String()),
+		)
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("error running script: %v", err)
+		}
+	}
+
 	return nil
 }
 
@@ -114,6 +130,17 @@ func (d *DHCP) Release(args *skel.CmdArgs, reply *struct{}) error {
 	if l := d.getLease(clientID); l != nil {
 		l.Stop()
 		d.clearLease(clientID)
+	}
+
+	if d.script != "" {
+		cmd := exec.Command(d.script, "deconfig")
+		cmd.Env = append(os.Environ(),
+			fmt.Sprintf("ID=%v", args.ContainerID),
+			fmt.Sprintf("NAME=%v", conf.Name),
+		)
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("error running script: %v", err)
+		}
 	}
 
 	return nil
@@ -173,7 +200,7 @@ func getListener(socketPath string) (net.Listener, error) {
 }
 
 func runDaemon(
-	pidfilePath, hostPrefix, socketPath string,
+	pidfilePath, hostPrefix, socketPath string, script string,
 	dhcpClientTimeout time.Duration, resendMax time.Duration, broadcast bool,
 ) error {
 	// since other goroutines (on separate threads) will change namespaces,
@@ -198,6 +225,7 @@ func runDaemon(
 	dhcp := newDHCP(dhcpClientTimeout, resendMax)
 	dhcp.hostNetnsPrefix = hostPrefix
 	dhcp.broadcast = broadcast
+	dhcp.script = script
 	rpc.Register(dhcp)
 	rpc.HandleHTTP()
 	http.Serve(l, nil)
