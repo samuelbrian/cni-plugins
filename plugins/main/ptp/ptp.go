@@ -47,6 +47,7 @@ type NetConf struct {
 	types.NetConf
 	IPMasq bool `json:"ipMasq"`
 	MTU    int  `json:"mtu"`
+	NoHostSetup bool `json:"noHostSetup"`
 }
 
 func setupContainerVeth(netns ns.NetNS, ifName string, mtu int, pr *current.Result) (*current.Interface, *current.Interface, error) {
@@ -225,8 +226,10 @@ func cmdAdd(args *skel.CmdArgs) error {
 		return err
 	}
 
-	if err = setupHostVeth(hostInterface.Name, result); err != nil {
-		return err
+	if !conf.NoHostSetup {
+		if err = setupHostVeth(hostInterface.Name, result); err != nil {
+			return err
+		}
 	}
 
 	if conf.IPMasq {
