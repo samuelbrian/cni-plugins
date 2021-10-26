@@ -48,9 +48,12 @@ type NetConf struct {
 	IPMasq bool `json:"ipMasq"`
 	MTU    int  `json:"mtu"`
 	NoHostSetup bool `json:"noHostSetup"`
+	Veth string `json:"veth"`
 }
 
-func setupContainerVeth(netns ns.NetNS, ifName string, mtu int, pr *current.Result) (*current.Interface, *current.Interface, error) {
+func setupContainerVeth(netns ns.NetNS, ifName string,
+		hostVeth net.Interface, contVeth0 net.Interface, noPTPFixup bool,
+		pr *current.Result) (*current.Interface, *current.Interface, error) {
 	// The IPAM result will be something like IP=192.168.3.5/24, GW=192.168.3.1.
 	// What we want is really a point-to-point link but veth does not support IFF_POINTTOPOINT.
 	// Next best thing would be to let it ARP but set interface to 192.168.3.5/32 and
@@ -66,10 +69,6 @@ func setupContainerVeth(netns ns.NetNS, ifName string, mtu int, pr *current.Resu
 	containerInterface := &current.Interface{}
 
 	err := netns.Do(func(hostNS ns.NetNS) error {
-		hostVeth, contVeth0, err := ip.SetupVeth(ifName, mtu, "", hostNS)
-		if err != nil {
-			return err
-		}
 		hostInterface.Name = hostVeth.Name
 		hostInterface.Mac = hostVeth.HardwareAddr.String()
 		containerInterface.Name = contVeth0.Name
@@ -82,6 +81,14 @@ func setupContainerVeth(netns ns.NetNS, ifName string, mtu int, pr *current.Resu
 		}
 
 		pr.Interfaces = []*current.Interface{hostInterface, containerInterface}
+
+		if err := ipam.ConfigureIface(ifName, pr); err != nil {
+			return err
+		}
+
+		if noPTPFixup {
+			return nil
+		}
 
 		contVeth, err := net.InterfaceByName(ifName)
 		if err != nil {
@@ -188,6 +195,27 @@ func cmdAdd(args *skel.CmdArgs) error {
 		return fmt.Errorf("failed to load netconf: %v", err)
 	}
 
+	netns, err := ns.GetNS(args.Netns)
+	if err != nil {
+		return fmt.Errorf("failed to open netns %q: %v", args.Netns, err)
+	}
+	defer netns.Close()
+
+	var hostVeth net.Interface
+	var contVeth0 net.Interface
+	err = netns.Do(func(hostNS ns.NetNS) error {
+		if conf.Veth == "" {
+			hostVeth, contVeth0, err = ip.SetupVeth(args.IfName, conf.MTU, "", hostNS)
+		} else {
+			hostVeth, contVeth0, err = ip.SetupVethWithName(args.IfName,
+				conf.Veth, conf.MTU, "", hostNS)
+		}
+		return err
+	})
+	if err != nil {
+		return err
+	}
+
 	// run the IPAM plugin and get back the config to apply
 	r, err := ipam.ExecAdd(conf.IPAM.Type, args.StdinData)
 	if err != nil {
@@ -215,13 +243,8 @@ func cmdAdd(args *skel.CmdArgs) error {
 		return fmt.Errorf("Could not enable IP forwarding: %v", err)
 	}
 
-	netns, err := ns.GetNS(args.Netns)
-	if err != nil {
-		return fmt.Errorf("failed to open netns %q: %v", args.Netns, err)
-	}
-	defer netns.Close()
-
-	hostInterface, _, err := setupContainerVeth(netns, args.IfName, conf.MTU, result)
+	hostInterface, _, err := setupContainerVeth(netns, args.IfName,
+		hostVeth, contVeth0, conf.Veth != "", result)
 	if err != nil {
 		return err
 	}
