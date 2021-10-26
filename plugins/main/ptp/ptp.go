@@ -289,7 +289,7 @@ func cmdDel(args *skel.CmdArgs) error {
 	}
 
 	if err := ipam.ExecDel(conf.IPAM.Type, args.StdinData); err != nil {
-		return err
+		fmt.Fprintf(os.Stderr, "%v", err)
 	}
 
 	if args.Netns == "" {
